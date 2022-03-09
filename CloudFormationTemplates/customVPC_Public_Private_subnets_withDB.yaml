@@ -1,0 +1,404 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creating custom VPC
+
+# Custom VPC with private subnet and Internet Gateway
+
+Parameters:
+
+  CustomVpcCidr:
+    Type: String
+    Default: 10.0.0.0/20
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.0.0/24
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.0.2.0/24
+
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instance
+    Type: 'AWS::EC2::KeyPair::KeyName'
+
+  username:
+    NoEcho: 'true'
+    Description: Username for mySQL database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+
+  password:
+    NoEcho: 'true'
+    Description: Password for MySQL database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+
+Resources:
+
+###########
+# VPC with Internet Gateway
+###########
+
+  CustomVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CustomVpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: CustomVPC
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Custom IGW
+
+  VPCtoIGWConnection:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+      - IGW
+      - CustomVPC
+    Properties:
+      InternetGatewayId: !Ref IGW
+      VpcId: !Ref CustomVPC
+
+
+
+###########
+# Private Route Table
+###########
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: CustomVPC
+    Properties:
+      VpcId: !Ref CustomVPC
+      Tags:
+        - Key: Name
+          Value: Private Route Table
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - PrivateRouteTable
+      - IGW
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PrivateSubnet1
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1
+      RouteTableId:
+        Ref: PrivateRouteTable
+
+###########
+# Private Subnet
+###########
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: CustomVPC
+    Properties:
+      VpcId: !Ref CustomVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+      Tags:
+        - Key: Name
+          Value: Private Subnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: CustomVPC
+    Properties:
+      VpcId: !Ref CustomVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs
+          Ref: AWS::Region
+      Tags:
+        - Key: Name
+          Value: Private Subnet2
+
+###########
+# Public Subnet
+###########
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: CustomVPC
+    Properties:
+      VpcId: !Ref CustomVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+      Tags:
+        - Key: Name
+          Value: Public Subnet
+
+
+###########
+# Public Route Table
+###########
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: CustomVPC
+    Properties:
+      VpcId: !Ref CustomVPC
+      Tags:
+        - Key: Name
+          Value: Public Route Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - PublicRouteTable
+      - IGW
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PublicSubnet
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet
+      RouteTableId:
+        Ref: PublicRouteTable
+
+###########
+# NAT GATEWAY
+###########
+
+  NatGateway:
+    Type: "AWS::EC2::NatGateway"
+    DependsOn: NatPublicIP
+    Properties:
+      AllocationId: !GetAtt NatPublicIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  NatPublicIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: CustomVPC
+    Properties:
+      Domain: vpc
+
+
+
+###########
+# Web Security Group
+###########
+
+  CustomVpcWebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: CustomVPC
+    Properties:
+      GroupName: CustomVPCWeb
+      GroupDescription: SSH Access
+      VpcId: !Ref CustomVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: CustomVPCWeb_Security
+
+###########
+# DB Subnet Group
+###########
+
+  WebSiteDBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: 'DB Subnet group for Amazon Aurora'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: String
+          Value: String
+
+###########
+# Database Security Group
+###########
+
+
+  CustomVpcDBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn: CustomVPC
+    Properties:
+      GroupName: CustomVPCDB
+      GroupDescription: Enable access to DB from Custom VPC website server
+      VpcId: !Ref CustomVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId:
+            Ref: CustomVpcWebSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: BlogWebsiteDB
+
+
+###########
+# RDS Cluster
+###########
+  WebsiteRDSCluster:
+    Properties:
+      DBSubnetGroupName:
+        Ref: WebSiteDBSubnetGroup
+      Engine: aurora
+      MasterUserPassword:
+        Ref: password
+      MasterUsername:
+        Ref: username
+      VpcSecurityGroupIds:
+        - !Ref CustomVpcDBSecurityGroup
+    Type: "AWS::RDS::DBCluster"
+
+  RDSDBClusterParameterGroup:
+    Properties:
+      Description: "CloudFormation Sample Aurora Cluster Parameter Group"
+      Family: aurora5.6
+      Parameters:
+        time_zone: US/Eastern
+    Type: "AWS::RDS::DBClusterParameterGroup"
+
+
+###########
+# RDS Instances
+###########
+  RDSDBInstance1:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBClusterIdentifier:
+        Ref: WebsiteRDSCluster
+      DBInstanceClass: db.r3.xlarge
+      DBSubnetGroupName:
+        Ref: WebSiteDBSubnetGroup
+      Engine: aurora
+      PubliclyAccessible: "true"
+
+
+
+  RDSDBInstance2:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBClusterIdentifier:
+        Ref: WebsiteRDSCluster
+      DBInstanceClass: db.r3.xlarge
+      DBSubnetGroupName:
+        Ref: WebSiteDBSubnetGroup
+      Engine: aurora
+      PubliclyAccessible: "true"
+
+
+
+###########
+# Website Server Instances
+###########
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmazonLinuxAMIID
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref CustomVpcWebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: customVPCEC2
+      KeyName: !Ref KeyName
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd php
+          systemctl start httpd
+          systemctl enable httpd
+          usermod -a -G apache ec2-user
+          chown -R ec2-user:apache /var/www
+          chmod 2775 /var/www
+          find /var/www -type d -exec chmod 2775 {} \;
+          find /var/www -type f -exec chmod 0664 {} \;
+          # PHP script to display Instance ID and Availability Zone
+          cat << 'EOF' > /var/www/html/index.php
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <center>
+                <?php
+                # Get the instance ID from meta-data and store it in the $instance_id variable
+                $url = "http://169.254.169.254/latest/meta-data/instance-id";
+                $instance_id = file_get_contents($url);
+                # Get the instance's availability zone from metadata and store it in the $zone variable
+                $url = "http://169.254.169.254/latest/meta-data/placement/availability-zone";
+                $zone = file_get_contents($url);
+                ?>
+                <h2>EC2 Instance ID: <?php echo $instance_id ?></h2>
+                <h2>Availability Zone: <?php echo $zone ?></h2>
+              </center>
+            </body>
+            </html>
+          EOF
+  # Delete the following commented lines on production
+  #BlockDeviceMappings:
+  #  -
+      #DeviceName: /dev/sdm
+      #Ebs:
+      #  VolumeType: io1
+      #  Iops: 200
+      #  DeleteOnTermination: false
+      #  VolumeSize: 20
+#  WebsiteEIP:
+#  Type: AWS::EC2::EIP
+#  Properties:
+#    InstanceId:
+#    Ref: MyEC2Instance
+#  Tags:
+#    - Key: Name
+#      Value: BlogWebsite EIP
